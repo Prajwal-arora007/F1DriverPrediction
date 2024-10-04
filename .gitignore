@@ -1,0 +1,24 @@
+# Ignore virtual environment folders
+venv/
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+
+# Ignore Jupyter Notebook checkpoints (if using notebooks)
+.ipynb_checkpoints/
+
+# Ignore log files (optional)
+*.log
+
+# Ignore model files (optional)
+models/
+
+# Ignore data files (optional)
+data/
+
+# Ignore environment files (optional, depending on your setup)
+.env
+
+# Ignore IDE config files (optional)
+.vscode/
