@@ -1,11 +1,11 @@
-import streamlit as st
-import pandas as pd
 import requests
+import pandas as pd
+import streamlit as st
 import numpy as np
 from sklearn.ensemble import RandomForestRegressor
-from xgboost import XGBRegressor
+import plotly.express as px
 
-# Cache data fetching functions to improve performance
+# Cache API calls for performance
 @st.cache_data
 def fetch_drivers(season):
     """Fetch all drivers for a given season."""
@@ -17,7 +17,6 @@ def fetch_drivers(season):
         driver_mapping = {f"{d['givenName']} {d['familyName']}": d['driverId'] for d in drivers}
         return driver_list, driver_mapping
     else:
-        st.error(f"Failed to fetch drivers: {response.status_code}")
         return [], {}
 
 @st.cache_data
@@ -31,109 +30,198 @@ def fetch_race_schedule(season):
             {
                 'round': race['round'],
                 'race_name': race['raceName'],
-                'circuit_name': race['Circuit']['circuitName'],
-                'location': f"{race['Circuit']['Location']['locality']}, {race['Circuit']['Location']['country']}",
                 'date': race['date']
             }
             for race in races
         ]
     else:
-        st.error(f"Failed to fetch races: {response.status_code}")
         return []
 
 @st.cache_data
-def fetch_qualifying_results(season, round_number, driver_id):
-    """Fetch qualifying position for the driver."""
-    url = f"https://ergast.com/api/f1/{season}/{round_number}/drivers/{driver_id}/qualifying.json"
+def fetch_driver_standings(season, round_number):
+    """Fetch driver standings for a given season and round."""
+    url = f"http://ergast.com/api/f1/{season}/{round_number}/driverStandings.json"
     response = requests.get(url)
+    if response.status_code == 200:
+        standings = response.json()['MRData']['StandingsTable']['StandingsLists'][0]['DriverStandings']
+        return pd.DataFrame([{
+            "Driver": f"{s['Driver']['givenName']} {s['Driver']['familyName']}",
+            "Position": int(s['position']),
+            "Points": float(s['points'])
+        } for s in standings])
+    else:
+        return pd.DataFrame()
+
+@st.cache_data
+def fetch_lap_times(year, round_number):
+    """Fetch lap times for a given race year and round."""
+    url = f"http://ergast.com/api/f1/{year}/{round_number}/laps.json"
+    response = requests.get(url)
+    
     if response.status_code == 200:
         try:
-            return int(response.json()['MRData']['RaceTable']['Races'][0]['QualifyingResults'][0]['position'])
-        except (IndexError, KeyError):
-            return None
-    return None
+            lap_times_data = response.json()
+            lap_times = []
+            for race in lap_times_data['MRData']['RaceTable']['Races']:
+                for lap in race['Laps']:
+                    for timing in lap['Timings']:
+                        driver_id = timing['driverId']
+                        lap_time_str = timing.get('time', None)
+                        
+                        if lap_time_str:  # Ensure lap time exists
+                            min_sec = lap_time_str.split(":")
+                            if len(min_sec) == 2:
+                                minutes, seconds = min_sec
+                                total_seconds = int(minutes) * 60 + float(seconds)
+                                lap_times.append({
+                                    "Driver": driver_id,
+                                    "Lap Time (s)": total_seconds,
+                                    "Lap": lap['number']
+                                })
 
-@st.cache_data
-def fetch_driver_race_result(season, round_number, driver_id):
-    """Fetch the driver’s race result."""
-    url = f"https://ergast.com/api/f1/{season}/{round_number}/drivers/{driver_id}/results.json"
-    response = requests.get(url)
-    if response.status_code == 200:
-        result = response.json()['MRData']['RaceTable']['Races'][0]['Results'][0]
-        position = int(result['position'])
-        points = float(result['points'])
-        constructor_name = result['Constructor']['name']
-        return position, points, constructor_name
+            return pd.DataFrame(lap_times)
+        
+        except Exception as e:
+            print(f"Error parsing lap times: {e}")
+            return pd.DataFrame()
+
     else:
-        st.error(f"Failed to fetch race result: {response.status_code}")
-        return None, None, None
+        print(f"Failed to fetch lap times, status code: {response.status_code}")
+        return pd.DataFrame()
 
-@st.cache_data
-def fetch_constructor_points(season, constructor_name):
-    """Fetch constructor points for the given season."""
-    url = f"https://ergast.com/api/f1/{season}/constructorStandings.json"
-    response = requests.get(url)
-    if response.status_code == 200:
-        standings = response.json()['MRData']['StandingsTable']['StandingsLists'][0]['ConstructorStandings']
-        for constructor in standings:
-            if constructor['Constructor']['name'] == constructor_name:
-                # Handle missing points safely using .get()
-                return float(constructor.get('points', 0.0))
-    return 0.0
+# Streamlit App
+st.title("F1 Race Prediction System")
+st.sidebar.header("Set Parameters")
 
-# App Title and Sidebar Inputs
-st.title("F1 Race Outcome Prediction System")
-st.sidebar.header("Input Parameters")
-
-# Season and Driver Selection
-season = st.sidebar.selectbox('Select Season', ['2023', '2022', '2021', '2020'])
+# Season and Race Data
+season = st.sidebar.selectbox("Select Season", ['2023', '2022', '2021', '2020'])
 driver_list, driver_mapping = fetch_drivers(season)
-race_list = fetch_race_schedule(season)
-driver = st.sidebar.selectbox('Select Driver', driver_list)
-driver_id = driver_mapping[driver]
+race_schedule = fetch_race_schedule(season)
 
-# Race Selection
-race_selection = st.sidebar.selectbox('Select Race', [f"Round {r['round']}: {r['race_name']}" for r in race_list])
-selected_race = next(r for r in race_list if f"Round {r['round']}: {r['race_name']}" == race_selection)
+# Driver and Race Selection
+driver = st.sidebar.selectbox("Select Driver", driver_list)
+driver_id = driver_mapping[driver]
+race_selection = st.sidebar.selectbox(
+    "Select Race", [f"Round {r['round']}: {r['race_name']}" for r in race_schedule]
+)
+selected_race = next(r for r in race_schedule if f"Round {r['round']}: {r['race_name']}" == race_selection)
 race_round = selected_race['round']
 
-# Fetch Data for Display
-qualifying_position = fetch_qualifying_results(season, race_round, driver_id)
-finish_position, driver_points, constructor_name = fetch_driver_race_result(season, race_round, driver_id)
-constructor_points = fetch_constructor_points(season, constructor_name)
+# Fetch Driver Standings Data
+standings_df = fetch_driver_standings(season, race_round)
 
-# Display Actual Data
-st.subheader("Actual Race and Qualifying Data")
-st.write(f"**Qualifying Position:** {qualifying_position}")
-st.write(f"**Finishing Position:** {finish_position}")
-st.write(f"**Driver Points:** {driver_points}")
-st.write(f"**Constructor:** {constructor_name}")
-st.write(f"**Constructor Points:** {constructor_points}")
+# Fetch Lap Times Data
+lap_times_df = fetch_lap_times(season, race_round)
 
-# Manual Inputs for Prediction
-st.sidebar.subheader("Prediction Parameters")
-weather = st.sidebar.selectbox('Weather Condition', ['Dry', 'Wet'])
-lap_time = st.sidebar.number_input('Lap Time (seconds)', min_value=60.0, max_value=120.0, value=90.0)
-pit_stops = st.sidebar.slider('Number of Pit Stops', min_value=0, max_value=5, value=2)
+# Reset Prediction Parameters on Selection Change
+if "last_driver" not in st.session_state or driver != st.session_state.last_driver:
+    st.session_state.avg_lap_time = 90.0  # Set the initial average lap time
+    st.session_state.pit_stops = 2
+    st.session_state.track_condition = "Dry"
+st.session_state.last_driver = driver
 
-# Prepare Features and Train Model Dynamically
-if qualifying_position is not None and finish_position is not None:
-    X = np.array([[qualifying_position, constructor_points, lap_time, pit_stops]])
-    y = np.array([finish_position])  # Use actual finish position as the target
+# Prediction Parameters
+st.sidebar.subheader("Prediction Inputs")
+avg_lap_time = st.sidebar.number_input(
+    "Average Lap Time (seconds)", 
+    min_value=60.0, max_value=120.0, value=st.session_state.avg_lap_time, step=0.1
+)
+pit_stops = st.sidebar.slider(
+    "Number of Pit Stops", 
+    min_value=0, max_value=5, value=st.session_state.pit_stops
+)
+track_condition = st.sidebar.selectbox(
+    "Track Condition", 
+    ['Dry', 'Wet'], 
+    index=0 if st.session_state.track_condition == "Dry" else 1
+)
 
-    model_choice = st.sidebar.selectbox('Choose Model', ['Random Forest', 'XGBoost'])
-    if model_choice == 'Random Forest':
-        model = RandomForestRegressor(n_estimators=100, random_state=42)
-    else:
-        model = XGBRegressor(n_estimators=100, random_state=42)
+# Original Race Data (Static)
+original_data = {
+    "Qualifying Position": standings_df[standings_df["Driver"] == driver]["Position"].values[0] 
+    if not standings_df.empty else None,
+    "Points": standings_df[standings_df["Driver"] == driver]["Points"].values[0] 
+    if not standings_df.empty else None,
+    "Lap Time (s)": st.session_state.avg_lap_time,  # Keep the original avg lap time
+    "Pit Stops": 2  # Default
+}
 
-    # Train the Model and Make Prediction
-    model.fit(X, y)
-    predicted_position = model.predict(X)[0]
+# Display Original Data Table (Original Lap Time is preserved)
+st.subheader("Original Race Data")
+st.table(pd.DataFrame([original_data]))
 
-    # Display Prediction
-    st.subheader("Prediction")
-    st.write(f"**Predicted Position for {driver}:** {int(predicted_position)}")
+# Predictions based on parameters
+if not standings_df.empty:
+    # Simulate data for prediction
+    dummy_X = np.random.rand(100, 3)  # 100 samples with 3 features
+    dummy_y = np.random.randint(1, 21, 100)  # Random positions (1-20)
+
+    # Train a simple model
+    model = RandomForestRegressor(n_estimators=100, random_state=42)
+    model.fit(dummy_X, dummy_y)
+
+    # Predict position for the selected driver
+    X_test = np.array([[original_data["Qualifying Position"], avg_lap_time, pit_stops]])
+    predicted_position = int(model.predict(X_test)[0])
+
+    # Predicted Race Data
+    predicted_data = {
+        "Lap Time (s)": avg_lap_time,
+        "Pit Stops": pit_stops,
+        "Predicted Position": predicted_position
+    }
+
+    # Display Predicted Data Table
+    st.subheader("Predicted Race Data")
+    st.table(pd.DataFrame([predicted_data]))
+
+    # Update Driver Standings with Original Lap Times
+    if not lap_times_df.empty:
+        # Merge lap times with standings data to show original lap time for each driver
+        avg_lap_times = lap_times_df.groupby('Driver')['Lap Time (s)'].mean().reset_index()
+        standings_df = pd.merge(standings_df, avg_lap_times, on='Driver', how='left')
+
+    # Keep the original points column intact
+    standings_df = standings_df[['Driver', 'Position', 'Points']]  # Only keep Driver, Position, Points
+
+    # Highlight the selected driver in the standings table
+    def highlight_selected_racer(row):
+        return ['background-color: yellow' if row['Driver'] == driver else '' for _ in row]
+
+    # Display Standings Table with Selected Racer Highlighted
+    st.subheader("Driver Standings")
+
+    # Use st.dataframe for better customization and larger display
+    st.dataframe(
+        standings_df.style.apply(highlight_selected_racer, axis=1)
+        .set_table_styles([
+            {'selector': 'th', 'props': [('font-size', '16px')]},
+            {'selector': 'td', 'props': [('font-size', '14px')]},
+            # Increase width for the 'Points' column
+            {'selector': '.col2', 'props': [('width', '150px')]},  # Points column (column index 2)
+        ]),
+        height=600
+    )
+
+    # New Lap Time Trend Graph
+    if not lap_times_df.empty:
+        # Create a line graph of lap times vs lap number for the selected driver
+        driver_lap_times = lap_times_df[lap_times_df['Driver'] == driver]
+        
+        if not driver_lap_times.empty:
+            lap_time_fig = px.line(
+                driver_lap_times, x="Lap", y="Lap Time (s)", title=f"Lap Time Trend for {driver}",
+                labels={"Lap": "Lap Number", "Lap Time (s)": "Lap Time (Seconds)"}
+            )
+            st.plotly_chart(lap_time_fig)
+
+    # Training data visualization (for demonstration purposes)
+    st.subheader("Training Data Visualization")
+    fig = px.scatter(
+        x=dummy_X[:, 0], y=dummy_y, labels={"x": "Lap Time (s)", "y": "Position"},
+        title="Training Data: Lap Time vs Position"
+    )
+    st.plotly_chart(fig)
 
 else:
-    st.warning("Qualifying and race data are required for prediction.")
+    st.error("No standings data available for the selected race.")
